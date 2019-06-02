@@ -29,7 +29,14 @@ set -o nounset                              # Treat unset variables as an error
 setup_iptables() {
 	local IPT=$1
 	local docker_network=$2
-	
+        local info_file=$3
+
+	echo "iptables info" >$info_file
+        echo "docker_network: ${docker_network}" >>$info_file
+	echo "VPN ports: $vpnport" >>$info_file
+	[[ -n "${dns_server1}" ]] && echo "DNS Server 1: ${dns_server1}" >>$info_file
+	[[ -n "${dns_server2}" ]] && echo "DNS Server 2: ${dns_server2}" >>$info_file
+
 	# Basically, the idea of these rules are:
 	# - By default, block everything
 	# - Accept packets on established or related connections
@@ -38,18 +45,18 @@ setup_iptables() {
 	# - Allow output on our VPN port (defaults to 1194)
 	# - Allow output on tun devices (which will be our VPN tunnel once it's established)
 	# - Allow output to the local docker network
-	
+
 	# Because we block everything by default, nothing should be able to access anything until we output
 	# on one of our allowed connections (DNS server / port, VPN port, tun adapter or docker_network).
 	# Once we've tried to access one of these, the rest of the packets will be allowed by the 
 	# conntrack (connection tracking) rules
-	
+
 	# Delete non-default chains
 	${IPT} -X
-	
+
 	# Flush built-in chains
 	${IPT} -F
-	
+
 	# Set default policy for built-in chains to drop packets
 	${IPT} -P INPUT DROP
     ${IPT} -P OUTPUT DROP
@@ -65,22 +72,28 @@ setup_iptables() {
 
     # Allow access to DNS
 	[[ -n "${dns_server1}" ]] &&
-		${IPT} -A OUTPUT -d ${dns_server1} -j ACCEPT
+		${IPT} -A OUTPUT -d ${dns_server1} -p tcp -m tcp --dport 53 -j ACCEPT &&
+		${IPT} -A OUTPUT -d ${dns_server1} -p udp -m udp --dport 53 -j ACCEPT &&
+		echo "nameserver $dns_server1" >>/etc/resolv.conf
 	[[ -n "${dns_server2}" ]] &&
-		${IPT} -A OUTPUT -d ${dns_server2} -j ACCEPT
-
-	# These are DNS ports
-    ${IPT} -A OUTPUT -p tcp -m tcp --dport 53 -j ACCEPT
-    ${IPT} -A OUTPUT -p udp -m udp --dport 53 -j ACCEPT
+		${IPT} -A OUTPUT -d ${dns_server2} -p tcp -m tcp --dport 53 -j ACCEPT &&
+		${IPT} -A OUTPUT -d ${dns_server2} -p udp -m udp --dport 53 -j ACCEPT &&
+		echo "nameserver $dns_server2" >>/etc/resolv.conf
 
 	# Allow output from source VPN port and to destination VPN port
-    ${IPT} -A OUTPUT -p udp -m udp --sport $vpnport -j ACCEPT
-    ${IPT} -A OUTPUT -p udp -m udp --dport $vpnport -j ACCEPT
-    ${IPT} -A OUTPUT -p tcp -m tcp --dport $vpnport -j ACCEPT
-	
+	while read -r port; do
+	    ${IPT} -A OUTPUT -p udp -m udp --sport $port -j ACCEPT
+	    ${IPT} -A OUTPUT -p udp -m udp --dport $port -j ACCEPT
+	    ${IPT} -A OUTPUT -p tcp -m tcp --dport $port -j ACCEPT
+
+		echo "Added VPN Port: ${port}" >>$info_file
+
+
+	done <<< "$vpnport"
+
 	# Allow output on all tun devices
     ${IPT} -A OUTPUT -o tun+ -j ACCEPT
-	
+
 	# Allow output to the docker network
     ${IPT} -A OUTPUT -d ${docker_network} -j ACCEPT
 }
@@ -91,11 +104,14 @@ setup_iptables() {
 firewall() {
 	# Get the local network address (IPv4 and IPv6) that we're running on
 	local docker_network="$(ip -o addr show dev eth0 | awk '$3 == "inet" {print $4}')"
-    local docker6_network="$(ip -o addr show dev eth0 | awk '$3 == "inet6" {print $4; exit}')"
-	
+	local docker6_network="$(ip -o addr show dev eth0 | awk '$3 == "inet6" {print $4; exit}')"
+
+	# Reset resolv.conf
+	echo "nameserver 127.0.0.1" >/etc/resolv.conf
+
 	# Setup iptables
-	setup_iptables ip6tables docker6_network
-	setup_iptables iptables docker_network
+	[[ ${docker6_network} ]] && setup_iptables ip6tables ${docker6_network} ${firewall_info6}
+	[[ ${docker_network} ]] && setup_iptables iptables ${docker_network} ${firewall_info}
 }
 
 ### return_route6: add a route from the docker network to your host
@@ -107,9 +123,9 @@ return_route6() {
     ip -6 route | grep -q "$network" ||
         ip -6 route add to $network via $defaultNetwork dev eth0
     ip6tables -A OUTPUT --d $network -j ACCEPT
-	
+
 	# Add the info to the route info file
-    [[ -e $route6 ]] && grep -q "^$network\$" $route6 || echo "$network" >> $route6
+    echo "Route added to $network via $defaultNetwork" >> $firewall_info6
 }
 
 ### return_route: add a route from the docker network to your host
@@ -121,7 +137,8 @@ return_route() {
     ip route | grep -q "$network" ||
         ip route add to $network via $defaultNetwork dev eth0
     iptables -A OUTPUT --d $network -j ACCEPT
-    [[ -e $route ]] && grep -q "^$network\$" $route || echo "$network" >> $route
+
+    echo "Route added to $network via $defaultNetwork" >> $firewall_info
 }
 
 ### ----------------------------------------------------
@@ -235,7 +252,7 @@ Options (fields in '[]' are optional, '<>' are required):
                 optional arg: [port] to use, instead of default
 
 The 'command' (if provided and valid) will be run instead of openvpn
-" > &2
+" >&2
     exit $RC
 }
 
@@ -267,8 +284,8 @@ input_conf="$dir/vpn.conf"
 conf="$dir/.vpn.conf"
 
 # Information about the firewall
-route="$dir/.firewall"
-route6="$dir/.firewall6"
+firewall_info="$dir/.firewall"
+firewall_info6="$dir/.firewall6"
 
 ### ----------------------------------------------------
 ### Main Script
@@ -280,15 +297,16 @@ route6="$dir/.firewall6"
 [[ -f $cert ]] || { [[ $(ls -d $dir/* | egrep '\.ce?rt$' 2>&- | wc -w) -eq 1 \
             ]] && cert="$(ls -d $dir/* | egrep '\.ce?rt$' 2>&-)"; }
 
-touch $route $route6
+rm $firewall_info
+rm $firewall_info6
 
 # Get parameters
-cert_auth_password = "${CERT_AUTH:-""}"
-route_6_network = "${ROUTE6:-""}"
-route_network = "${ROUTE:-""}"
-dns_server1 = "${DNS_SERVER1:-""}"
-dns_server2 = "${DNS_SERVER2:-""}"
-vpnport = ""
+cert_auth_password="${CERT_AUTH:-""}"
+route_6_network="${ROUTE6:-""}"
+route_network="${ROUTE:-""}"
+dns_server1="${DNS_SERVER1:-""}"
+dns_server2="${DNS_SERVER2:-""}"
+vpnport=""
 
 # Copy the input VPN config if it exists
 [[ -r $input_conf ]] && cp $input_conf $conf
@@ -299,7 +317,7 @@ vpnport = ""
 while getopts ":hc:d:R:r:v:" opt; do
     case "$opt" in
         h) usage ;;
-        c) cert_auth_password = "$OPTARG" ;;
+        c) cert_auth_password="$OPTARG" ;;
 		d) eval get_dns_servers $(sed 's/^/"/; s/$/"/; s/;/" "/g' <<< $OPTARG) ;;
         R) route_6_network "$OPTARG" ;;
         r) route_network "$OPTARG" ;;
@@ -322,6 +340,9 @@ add_dns_config
 [[ -z "$vpnport" ]] &&
     vpnport="$(awk '/^remote / && NF ~ /^[0-9]*$/ {print $NF}' $conf | grep ^ || echo 1194)"
 
+# Make sure vpnport doesn't contain duplicates
+vpnport=$(echo "$vpnport" | sort -u)
+
 # Setup the firewall
 firewall
 
@@ -330,6 +351,7 @@ firewall
 [[ "${route_network:-""}" ]] && return_route $route_network
 
 if [[ $# -ge 1 && -x $(which $1 2>&-) ]]; then
+    echo "Running command: $@"
     exec "$@"
 elif [[ $# -ge 1 ]]; then
     echo "ERROR: command not found: $1"
