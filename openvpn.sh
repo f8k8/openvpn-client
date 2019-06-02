@@ -93,6 +93,9 @@ setup_iptables() {
 
     # Allow output to the docker network
     ${IPT} -A OUTPUT -d ${docker_network} -j ACCEPT
+	
+	# Also allow input from the docker network
+	${IPT} -A INPUT -s ${docker_network} -j ACCEPT
 }
 
 ### firewall: firewall all output not DNS/VPN that's not over the VPN connection
