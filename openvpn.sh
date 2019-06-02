@@ -219,8 +219,8 @@ generate_vpn_config() {
 
 ### get_dns_servers: helper function to set the two DNS server addresses from arguments
 get_dns_servers() {
-    dns_server1="$1"
-    dns_server2="$2"
+    dns_server1="${1:-""}"
+    dns_server2="${2:-""}"
 }
 
 ### usage: Help
