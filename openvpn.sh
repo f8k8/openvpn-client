@@ -82,11 +82,11 @@ setup_iptables() {
     ${IPT} -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
     # Allow access to DNS
-    [[ -n "${dns_server1}" ]] &&
+    [[ -n "${dns1}" ]] &&
         ${IPT} -A OUTPUT -d ${dns1} -p tcp -m tcp --dport 53 -j ACCEPT &&
         ${IPT} -A OUTPUT -d ${dns1} -p udp -m udp --dport 53 -j ACCEPT &&
         echo "nameserver $dns1" >>/etc/resolv.conf
-    [[ -n "${dns_server2}" ]] &&
+    [[ -n "${dns2}" ]] &&
         ${IPT} -A OUTPUT -d ${dns2} -p tcp -m tcp --dport 53 -j ACCEPT &&
         ${IPT} -A OUTPUT -d ${dns2} -p udp -m udp --dport 53 -j ACCEPT &&
         echo "nameserver $dns2" >>/etc/resolv.conf
@@ -121,12 +121,12 @@ firewall() {
     echo "nameserver 127.0.0.1" >/etc/resolv.conf
 
 	# Reset iptables
-	[[ ${docker_network6} ]] && reset_iptables ip6tables
-	[[ ${docker_network} ]] && reset_iptables iptables
+	[[ "${docker_network6}" ]] && reset_iptables ip6tables
+	[[ "${docker_network}" ]] && reset_iptables iptables
 
     # Setup iptables
-    [[ "${ip6_enabled:-""}" = "1" ]] && [[ ${docker_network6} ]] && setup_iptables ip6tables ${docker_network6} ${dns_server1_6} ${dns_server2_6} ${firewall_info6}
-    [[ ${docker_network} ]] && setup_iptables iptables ${docker_network} ${dns_server1} ${dns_server2} ${firewall_info} 
+    [[ "${ip6_enabled:-""}" = "1" ]] && [[ ${docker_network6} ]] && setup_iptables ip6tables "${docker_network6}" "${dns_server1_6}" "${dns_server2_6}" "${firewall_info6}"
+    [[ "${docker_network}" ]] && setup_iptables iptables "${docker_network}" "${dns_server1}" "${dns_server2}" "${firewall_info}"
 }
 
 ### allow_host_network6: Allow input from the host network to the docker network
@@ -404,8 +404,8 @@ vpnport=$(echo "${vpnport}" | sort -u)
 firewall
 
 # Setup the holes to our host network if needed
-[[ "${ip6_enabled:-""}" = "1" ]] && [[ "${host_network6:-""}" ]] && allow_host_network6 ${host_network6}
-[[ "${host_network:-""}" ]] && allow_host_network ${host_network}
+[[ "${ip6_enabled:-""}" = "1" ]] && [[ "${host_network6:-""}" ]] && allow_host_network6 "${host_network6}"
+[[ "${host_network:-""}" ]] && allow_host_network "${host_network}"
 
 if [[ $# -ge 1 && -x $(which $1 2>&-) ]]; then
     echo "Running command: $@"
